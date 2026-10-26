@@ -1,0 +1,272 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Urja Meter API",
+    "version": "1.0.0",
+    "license": { "name": "MIT", "identifier": "MIT" },
+    "description": "A clean, read-only API over the Urja Meter Ops portal: smart meters, their place in the distribution network, and their consumption.\n\nMeter and hierarchy data come from an in-memory catalogue refreshed from the portal's bulk export (every 15 minutes); `meta` says how old it is. Consumption is fetched live from the portal and cached briefly.\n\nPortal timestamps carry no zone; they are treated as India Standard Time and returned as ISO 8601 with a `+05:30` offset. Errors share one shape: `{ \"error\": { \"code\", \"message\", \"details?\" } }`."
+  },
+  "servers": [{ "url": "http://localhost:3000", "description": "Local" }],
+  "security": [],
+  "tags": [
+    { "name": "Meters", "description": "Meter details, search and filtering." },
+    { "name": "Consumption", "description": "Energy use derived from register readings." },
+    { "name": "Network", "description": "The zone → … → transformer hierarchy." }
+  ],
+  "paths": {
+    "/api/v1/meters": {
+      "get": {
+        "tags": ["Meters"],
+        "operationId": "listMeters",
+        "summary": "List and filter meters",
+        "description": "List filters accept comma-separated values (OR within a filter, AND across filters) and are case-insensitive.",
+        "parameters": [
+          { "name": "q", "in": "query", "description": "Substring match on meter ID or serial number.", "schema": { "type": "string" }, "example": "J1000" },
+          { "name": "status", "in": "query", "description": "`installed`, `faulty`, `decommissioned`.", "schema": { "type": "string" }, "example": "faulty" },
+          { "name": "make", "in": "query", "description": "Manufacturer, e.g. `Genus,HPL`.", "schema": { "type": "string" } },
+          { "name": "phase", "in": "query", "description": "`single` or `three`.", "schema": { "type": "string" } },
+          { "name": "zone", "in": "query", "description": "Zone code(s), e.g. `Z-01`.", "schema": { "type": "string" } },
+          { "name": "circle", "in": "query", "description": "Circle code(s), e.g. `C-01`.", "schema": { "type": "string" } },
+          { "name": "division", "in": "query", "description": "Division code(s), e.g. `D-01`.", "schema": { "type": "string" } },
+          { "name": "subdivision", "in": "query", "description": "Subdivision code(s), e.g. `SD-01`.", "schema": { "type": "string" } },
+          { "name": "substation", "in": "query", "description": "Substation code(s), e.g. `SS-01`.", "schema": { "type": "string" } },
+          { "name": "feeder", "in": "query", "description": "Feeder code(s), e.g. `F-001`.", "schema": { "type": "string" } },
+          { "name": "transformer", "in": "query", "description": "Transformer code(s), e.g. `DT-001`.", "schema": { "type": "string" } },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "minimum": 1, "default": 1 } },
+          { "name": "pageSize", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": { "application/json": { "schema": {
+              "type": "object",
+              "properties": {
+                "data": { "type": "array", "items": { "$ref": "#/components/schemas/Meter" } },
+                "pagination": { "$ref": "#/components/schemas/Pagination" },
+                "meta": { "$ref": "#/components/schemas/CatalogueMeta" }
+              }
+            } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "502": { "$ref": "#/components/responses/PortalUnavailable" },
+          "503": { "$ref": "#/components/responses/PortalRateLimited" }
+        }
+      }
+    },
+    "/api/v1/meters/{meterId}": {
+      "get": {
+        "tags": ["Meters"],
+        "operationId": "getMeter",
+        "summary": "Get one meter",
+        "parameters": [{ "name": "meterId", "in": "path", "required": true, "description": "Meter ID (case-insensitive).", "schema": { "type": "string" }, "example": "J100000" }],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": { "application/json": { "schema": {
+              "type": "object",
+              "properties": { "data": { "$ref": "#/components/schemas/Meter" }, "meta": { "$ref": "#/components/schemas/CatalogueMeta" } }
+            } } }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "502": { "$ref": "#/components/responses/PortalUnavailable" },
+          "503": { "$ref": "#/components/responses/PortalRateLimited" }
+        }
+      }
+    },
+    "/api/v1/meters/{meterId}/consumption": {
+      "get": {
+        "tags": ["Consumption"],
+        "operationId": "getMeterConsumption",
+        "summary": "Consumption for a meter",
+        "description": "The portal stores cumulative kWh/kVAh register readings. This endpoint returns the energy used *per interval* (the difference between consecutive readings), labelled by interval start. Some meters report every 30 minutes, most once a day.\n\n`from`/`to` are inclusive IST days. With only one of them, a 7-day window is anchored on it. With neither, the portal's default applies (the last 7 days of data it holds).",
+        "parameters": [
+          { "name": "meterId", "in": "path", "required": true, "schema": { "type": "string" }, "example": "J100000" },
+          { "name": "from", "in": "query", "description": "First day (YYYY-MM-DD).", "schema": { "type": "string", "format": "date" }, "example": "2026-06-01" },
+          { "name": "to", "in": "query", "description": "Last day, inclusive (YYYY-MM-DD). Window at most 92 days.", "schema": { "type": "string", "format": "date" }, "example": "2026-06-07" }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": { "application/json": { "schema": {
+              "type": "object",
+              "properties": {
+                "data": { "$ref": "#/components/schemas/Consumption" },
+                "meta": {
+                  "type": "object",
+                  "properties": {
+                    "source": { "type": "string", "enum": ["portal", "cache"] },
+                    "fetchedAt": { "type": "string", "format": "date-time" },
+                    "cacheExpiresAt": { "type": "string", "format": "date-time" }
+                  }
+                }
+              }
+            } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "502": { "$ref": "#/components/responses/PortalUnavailable" },
+          "503": { "$ref": "#/components/responses/PortalRateLimited" }
+        }
+      }
+    },
+    "/api/v1/hierarchy": {
+      "get": {
+        "tags": ["Network"],
+        "operationId": "getHierarchy",
+        "summary": "Network hierarchy as a tree",
+        "description": "Built from each meter's own path. The portal's data is not a strict tree: divisions, subdivisions, substations and some feeders appear under several parents. Such a node appears once under each parent, and `meterCount` counts only meters reached via that path. `consistency` summarises this per level.",
+        "parameters": [{ "name": "depth", "in": "query", "description": "Levels to include below the root (0–7). Omit for the full tree.", "schema": { "type": "integer", "minimum": 0, "maximum": 7 } }],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": { "application/json": { "schema": {
+              "type": "object",
+              "properties": {
+                "data": {
+                  "type": "object",
+                  "properties": {
+                    "levels": { "type": "array", "items": { "type": "string" } },
+                    "consistency": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": { "level": { "type": "string" }, "nodeCount": { "type": "integer" }, "nodesWithMultipleParents": { "type": "integer" } }
+                      }
+                    },
+                    "tree": { "$ref": "#/components/schemas/TreeNode" }
+                  }
+                },
+                "meta": { "$ref": "#/components/schemas/CatalogueMeta" }
+              }
+            } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "502": { "$ref": "#/components/responses/PortalUnavailable" },
+          "503": { "$ref": "#/components/responses/PortalRateLimited" }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "NodeRef": {
+        "type": "object",
+        "properties": { "code": { "type": ["string", "null"], "example": "F-001" }, "name": { "type": ["string", "null"], "example": "Feeder 1" } }
+      },
+      "Meter": {
+        "type": "object",
+        "properties": {
+          "meterId": { "type": "string", "example": "J100000" },
+          "serialNumber": { "type": ["string", "null"], "example": "SE33962" },
+          "make": { "type": ["string", "null"], "example": "HPL" },
+          "phase": { "type": ["string", "null"], "enum": ["single", "three", null] },
+          "status": { "type": ["string", "null"], "enum": ["installed", "faulty", "decommissioned", null] },
+          "installationType": { "type": ["string", "null"], "enum": ["whole_current", "ct_operated", null] },
+          "network": {
+            "type": "object",
+            "description": "Path from zone down to the distribution transformer the meter is connected to.",
+            "properties": {
+              "zone": { "$ref": "#/components/schemas/NodeRef" },
+              "circle": { "$ref": "#/components/schemas/NodeRef" },
+              "division": { "$ref": "#/components/schemas/NodeRef" },
+              "subdivision": { "$ref": "#/components/schemas/NodeRef" },
+              "substation": { "$ref": "#/components/schemas/NodeRef" },
+              "feeder": { "$ref": "#/components/schemas/NodeRef" },
+              "transformer": { "$ref": "#/components/schemas/NodeRef" }
+            }
+          },
+          "location": {
+            "type": ["object", "null"],
+            "properties": { "latitude": { "type": "number" }, "longitude": { "type": "number" } }
+          },
+          "dataQuality": {
+            "type": "array",
+            "description": "Fields we repaired. `original` is what the portal said; `resolvedTo` is what we serve.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "field": { "type": "string", "example": "network.circle.code" },
+                "issue": { "type": "string", "enum": ["missing", "conflicts_with_transformer_register"] },
+                "original": { "type": ["string", "null"] },
+                "resolvedTo": { "type": ["string", "null"] }
+              }
+            }
+          }
+        }
+      },
+      "Consumption": {
+        "type": "object",
+        "properties": {
+          "meterId": { "type": "string" },
+          "requestedWindow": { "type": ["object", "null"], "properties": { "from": { "type": "string", "format": "date" }, "to": { "type": "string", "format": "date" } } },
+          "totalKwh": { "type": "number" },
+          "totalKvah": { "type": "number" },
+          "series": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "start": { "type": "string", "format": "date-time", "example": "2026-06-01T00:00:00+05:30" },
+                "end": { "type": "string", "format": "date-time" },
+                "kwh": { "type": ["number", "null"], "description": "Active energy used in the interval; null if a reading is missing." },
+                "kvah": { "type": ["number", "null"], "description": "Apparent energy used in the interval." },
+                "voltageR": { "type": ["number", "null"], "description": "R-phase voltage at the end of the interval." }
+              }
+            }
+          },
+          "notes": { "type": "array", "items": { "type": "string" }, "description": "Caveats about this response." }
+        }
+      },
+      "TreeNode": {
+        "type": "object",
+        "properties": {
+          "level": { "type": "string" },
+          "code": { "type": ["string", "null"] },
+          "name": { "type": ["string", "null"] },
+          "meterCount": { "type": "integer" },
+          "statusCounts": { "type": "object", "additionalProperties": { "type": "integer" } },
+          "childCount": { "type": "integer", "description": "Present instead of `children` when cut off by `depth`." },
+          "meterIds": { "type": "array", "items": { "type": "string" }, "description": "On transformer (leaf) nodes." },
+          "children": { "type": "array", "items": { "$ref": "#/components/schemas/TreeNode" } }
+        }
+      },
+      "Pagination": {
+        "type": "object",
+        "properties": { "page": { "type": "integer" }, "pageSize": { "type": "integer" }, "total": { "type": "integer" }, "totalPages": { "type": "integer" } }
+      },
+      "CatalogueMeta": {
+        "type": "object",
+        "description": "How fresh the data is.",
+        "properties": {
+          "source": { "type": "string" },
+          "fetchedAt": { "type": ["string", "null"], "format": "date-time" },
+          "ageSeconds": { "type": ["integer", "null"] },
+          "stale": { "type": "boolean", "description": "Older than the refresh TTL; a background refresh is under way." }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": { "type": "string", "example": "invalid_request" },
+              "message": { "type": "string" },
+              "details": { "type": "array", "items": { "type": "object", "properties": { "param": { "type": "string" }, "message": { "type": "string" } } } }
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": { "description": "Invalid parameters.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "NotFound": { "description": "No such meter.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "PortalUnavailable": { "description": "The upstream portal failed or rejected our credentials.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "PortalRateLimited": {
+        "description": "The upstream portal's rate limit could not be waited out in time.",
+        "headers": { "Retry-After": { "schema": { "type": "integer" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      }
+    }
+  }
+}
